@@ -23,6 +23,25 @@ if (typeof window.plugin !== 'function') window.plugin = function() {};
 // PLUGIN START ////////////////////////////////////////////////////////
 
 
+var _point_in_polygon = function (point, vs) {
+    // https://github.com/substack/point-in-polygon
+    // ray-casting algorithm based on
+    // http://www.ecse.rpi.edu/Homepages/wrf/Research/Short_Notes/pnpoly.html
+
+    var x = point[0], y = point[1];
+
+    var inside = false;
+    for (var i = 0, j = vs.length - 1; i < vs.length; j = i++) {
+        var xi = vs[i][0], yi = vs[i][1];
+        var xj = vs[j][0], yj = vs[j][1];
+
+        var intersect = ((yi > y) != (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi) + xi);
+        if (intersect) inside = !inside;
+    }
+
+    return inside;
+};
+
 
 class UIComponent {
   constructor(properties) {
@@ -66,15 +85,120 @@ class PortalIndexPlugin extends UIComponent {
     constructor() {
         super()
 
+        this.db = null
+        this.portalQueue = [];
+
         this.setupDesktop()
 
-        // addHook('portalAdded', this.handlePortalAdded.bind(this));
+        this.openDatabase()
+
+        addHook('portalAdded', this.handlePortalAdded.bind(this));
     }
+
+    static dbName() { return 'portal-index' }
+    static dbVersion() { return 2 }
 
     static initialState() {
         return {
             'searchRegions': JSON.parse(localStorage.getItem('portal-index-search-regions') || "[]")
         }
+    }
+
+    openDatabase() {
+        var request = window.indexedDB.open(PortalIndexPlugin.dbName(), PortalIndexPlugin.dbVersion())
+        request.onsuccess = (e) => { 
+            // console.log("PINDEX db open success", e)
+            this.db = e.target.result 
+            this.processQueues();
+        } 
+        request.onerror = (e) => console.log("PINDEX open database error", e)
+        request.onupgradeneeded = (e) => this.upgradeDb(e)
+    }
+
+    upgradeDb(e) {
+        var db = e.target.result;
+
+        if (e.newVersion == 2) {
+            //schema initialize
+            var portals = db.createObjectStore("portals", {keyPath: "guid"})
+        }
+        // console.log("PINDEX db upgrade", e)
+    }
+
+    handlePortalAdded(data) {
+        var portal = data.portal
+
+        if (!this.portalInSearchRegions(portal))  {
+            // console.log("PINDEX portal outside region", portal.options.data.title)
+            return;
+        }
+
+        if (!this.db) {
+            console.log("PINDEX portal queue", portal)
+            this.portalQueue.push(data)
+            return
+        }
+
+        var doc = { 
+            name: portal.options.data.title,
+            guid: portal.options.guid,
+            latE6: portal.options.data.latE6,
+            lngE6: portal.options.data.lngE6,
+            timestamp: Date.now(),
+            history: [],
+        }
+        if (window.plugin.regions) {
+            doc.region = window.plugin.regions.regionName(S2.S2Cell.FromLatLng(portal.getLatLng(), 6));
+        }
+
+        this.checkInPortal(doc)
+    }
+
+    checkInPortal(doc) {
+        // console.log("PINDEX checkIn", doc)
+        this.lookupPortal(doc.guid).then(existing => {
+            if (existing) {
+                // console.log("PINDEX skip existing", existing)
+            } else {
+                // console.log("PINDEX saving new", doc)
+                this.savePortal(doc).then(() => {
+                    // console.log("PINDEX saved", doc)
+                })
+            }
+        }, err => {
+            // console.log("PINDEX existing err", err)
+        })
+    }
+
+    lookupPortal(guid) {
+        return new Promise((resolve, reject) => {
+            var request = this.portals.get(guid)
+            request.onsuccess = (e) => resolve(request.result) 
+            request.onerror = (e) => reject(e)
+        })
+    }
+
+    savePortal(doc) {
+        return new Promise((resolve, reject) => {
+            var request = this.portals.add(doc)
+            request.onsuccess = (e) => resolve(e)
+            request.onerror = (e) => reject(e)
+        })
+    }
+
+    get portals() {
+        if (this.db) {
+            return this.db.transaction("portals", "readwrite").objectStore("portals")
+        }
+    }
+
+    processQueues() {
+        if (!this.db)
+            return;
+
+        console.log("PINDEX processing queues")
+        this.portalQueue.forEach(data => this.handlePortalAdded(data))
+        this.portalQueue = [];
     }
 
     setupDesktop() {
@@ -108,6 +232,9 @@ class PortalIndexPlugin extends UIComponent {
         el.append('<h3>Search Regions</h3>')
         var regions = $('<div></div>')
         el.append(regions)
+        if (this.state.searchRegions.length == 0) {
+            regions.append('<p>No regions selected.</p>')
+        }
         this.state.searchRegions.forEach(region => {
             var row = $(`<div>${region.label} </div>`)
             var deleteButton = $('<span>X</span>').click((e) => this.removeSearchRegion(region.stamp))
@@ -119,7 +246,7 @@ class PortalIndexPlugin extends UIComponent {
         var regions = this.getDrawnRegions().filter(l => definedStamps.indexOf(L.stamp(l)) == -1)
 
         var regionSelect = $('<select></select>')
-        regionSelect.append('<option value="">Add new region</option>')
+        regionSelect.append('<option value="">Add region</option>')
         if (regions.length > 0) {
             regions.forEach(l => {
                 regionSelect.append(`<option value="${l._leaflet_id}">${this.labelForLayer(l)}</option>`)
@@ -163,7 +290,6 @@ class PortalIndexPlugin extends UIComponent {
         else if (layer instanceof L.Polygon) {
             region.latlngs = layer.getLatLngs()
         }
-        console.log("PINDEX add region", layer, region)
         this.setState({
             'searchRegions': this.state.searchRegions.concat([region])
         }, () => this.saveSearchRegions())
@@ -176,13 +302,27 @@ class PortalIndexPlugin extends UIComponent {
     }
 
     saveSearchRegions() {
-        console.log("PINDEX region saved", this.state.searchRegions)
         localStorage.setItem('portal-index-search-regions', JSON.stringify(this.state.searchRegions))
     }
 
     getDrawnRegions() {
         var layers = plugin.drawTools.drawnItems.getLayers()
         return layers.filter(l => (l instanceof L.Circle || l instanceof L.Polygon))
+    }
+
+    portalInSearchRegions(portal) {
+        return this.state.searchRegions.map(region => this.portalInRegion(portal, region)).filter(_ => _ === true).length > 0
+    }
+
+    portalInRegion(portal, region) {
+        if (region.radius !== undefined) {
+            var center = new L.LatLng(region.latlng.lat, region.latlng.lng)
+            return center.distanceTo(portal.getLatLng()) <= region.radius
+        }
+        else {
+            return _point_in_polygon([portal._latlng.lat, portal._latlng.lng], region.latlngs.map(ll => [ll.lat, ll.lng]))
+        }
+
     }
 
 }
