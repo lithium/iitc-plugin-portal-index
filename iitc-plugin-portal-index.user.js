@@ -24,10 +24,57 @@ if (typeof window.plugin !== 'function') window.plugin = function() {};
 
 
 
+class UIComponent {
+  constructor(properties) {
+    this.props = Object.assign(this.constructor.defaultProps(), properties)
+    this.state = this.constructor.initialState()
+    this.mount();
+  }
 
-class PortalIndexPlugin {
+  static initialState() {
+    return {}
+  }
+
+  static defaultProps() {
+    return {}
+  }
+
+  mount(el) {
+    this.element = el || document.createElement('div') 
+    this.update()
+  }
+
+  setState(newState, thenF) {
+    Object.assign(this.state, newState)
+    this.update()
+    if (thenF !== undefined) {
+        thenF.apply(this)
+    }
+  }
+
+  update() {
+    this.element.innerHTML = "";
+    this.element.appendChild(this.render());
+  }
+}
+
+
+
+
+
+class PortalIndexPlugin extends UIComponent {
     constructor() {
+        super()
+
         this.setupDesktop()
+
+        // addHook('portalAdded', this.handlePortalAdded.bind(this));
+    }
+
+    static initialState() {
+        return {
+            'searchRegions': JSON.parse(localStorage.getItem('portal-index-search-regions') || "[]")
+        }
     }
 
     setupDesktop() {
@@ -36,9 +83,9 @@ class PortalIndexPlugin {
     }
 
     showDialog() {
-        this.element = this.render()
-
         if (!this.dialog) {
+            this.setState({})
+
             this.dialog = dialog({
               title: "Portal Index",
               html: this.element,
@@ -56,10 +103,95 @@ class PortalIndexPlugin {
     }
 
     render() {
-        return $("<div>index...</div>")
+        var el = $('<div></div>')
+
+        el.append('<h3>Search Regions</h3>')
+        var regions = $('<div></div>')
+        el.append(regions)
+        this.state.searchRegions.forEach(region => {
+            var row = $(`<div>${region.label} </div>`)
+            var deleteButton = $('<span>X</span>').click((e) => this.removeSearchRegion(region.stamp))
+            row.append(deleteButton)
+            regions.append(row)
+        })
+
+        var definedStamps = this.state.searchRegions.map(r => r.stamp)
+        var regions = this.getDrawnRegions().filter(l => definedStamps.indexOf(L.stamp(l)) == -1)
+
+        var regionSelect = $('<select></select>')
+        regionSelect.append('<option value="">Add new region</option>')
+        if (regions.length > 0) {
+            regions.forEach(l => {
+                regionSelect.append(`<option value="${l._leaflet_id}">${this.labelForLayer(l)}</option>`)
+            })
+        }
+        else if (this.state.searchRegions.length == 0) {
+            regionSelect.empty()
+            regionSelect.append('<option value="">Draw circles or polygons to define regions</option>')
+        }
+
+        regionSelect.change(e => {
+            var layer = plugin.drawTools.drawnItems.getLayer(regionSelect.val())
+            this.addSearchRegion(layer)
+        })
+        el.append(regionSelect)
+
+        return el[0];
+    }
+
+    labelForLayer(layer) {
+        var area = L.GeometryUtil.geodesicArea(layer.getLatLngs())
+        var readable = L.GeometryUtil.readableArea(area)
+        if (layer._mRadius) {
+            return `Circle ${readable}`
+        }
+        else
+        if (layer instanceof L.Polygon) {
+            return `Polygon ${readable}`
+        }
+    }
+
+    addSearchRegion(layer) {
+        var region = {
+            stamp: L.stamp(layer),
+            label: this.labelForLayer(layer),
+        }
+        if (layer._mRadius) {
+            region.radius = layer.getRadius()
+            region.latlng = layer.getLatLng()
+        }
+        else if (layer instanceof L.Polygon) {
+            region.latlngs = layer.getLatLngs()
+        }
+        console.log("PINDEX add region", layer, region)
+        this.setState({
+            'searchRegions': this.state.searchRegions.concat([region])
+        }, () => this.saveSearchRegions())
+    }
+    removeSearchRegion(stamp) {
+        this.setState({
+            'searchRegions': this.state.searchRegions.filter(r => r.stamp != stamp)
+        }, () => this.saveSearchRegions())
+
+    }
+
+    saveSearchRegions() {
+        console.log("PINDEX region saved", this.state.searchRegions)
+        localStorage.setItem('portal-index-search-regions', JSON.stringify(this.state.searchRegions))
+    }
+
+    getDrawnRegions() {
+        var layers = plugin.drawTools.drawnItems.getLayers()
+        return layers.filter(l => (l instanceof L.Circle || l instanceof L.Polygon))
     }
 
 }
+
+
+
+
+
+
 
 
 PortalIndexPlugin.boot = function() {
