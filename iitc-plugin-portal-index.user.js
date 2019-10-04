@@ -43,6 +43,66 @@ var _point_in_polygon = function (point, vs) {
 };
 
 
+class SearchRegion {
+    constructor(options) {
+        this.layer = options.layer 
+        this.doc = options.doc
+    }
+
+    get label() {
+        if (this.doc) return this.doc.label
+
+        if (this.layer) {
+            var area = L.GeometryUtil.geodesicArea(this.layer.getLatLngs())
+            var readable = L.GeometryUtil.readableArea(area)
+            if (this.layer._mRadius) {
+                return `Circle ${readable}`
+            }
+            else
+            if (this.layer instanceof L.Polygon) {
+                return `Polygon ${readable}`
+            }
+        } 
+    }
+
+    get guid() {
+        if (this.doc) return this.doc.guid
+
+        var latlngs = this.layer._mRadius ? [this.layer.getLatLng()] : this.layer.getLatLngs()
+        return latlngs.map(ll => `${ll.lat},${ll.lng}`).join("|")
+    }
+
+    getDocument() {
+        if (this.doc) return this.doc
+
+        var doc = {
+            guid: this.guid,
+            label: this.label
+        }
+        if (this.layer._mRadius) {
+            doc.radius = this.layer.getRadius()
+            doc.latlng = this.layer.getLatLng()
+        }
+        else if (this.layer instanceof L.Polygon) {
+            doc.latlngs = this.layer.getLatLngs()
+        }
+        return doc
+    }
+
+    containsPortal(portal) {
+        var doc = this.getDocument()
+        if (doc.radius) {
+            var center = new L.LatLng(doc.latlng.lat, doc.latlng.lng)
+            return center.distanceTo(portal.getLatLng()) <= doc.radius
+        }
+        else {
+            return _point_in_polygon([portal._latlng.lat, portal._latlng.lng], doc.latlngs.map(ll => [ll.lat, ll.lng]))
+        }
+
+    }
+}
+
+
 class UIComponent {
   constructor(properties) {
     this.props = Object.assign(this.constructor.defaultProps(), properties)
@@ -96,11 +156,11 @@ class PortalIndexPlugin extends UIComponent {
     }
 
     static dbName() { return 'portal-index' }
-    static dbVersion() { return 2 }
+    static dbVersion() { return 1 }
 
     static initialState() {
         return {
-            'searchRegions': JSON.parse(localStorage.getItem('portal-index-search-regions') || "[]"),
+            'searchRegions': [],
             'newPortals': [],
         }
     }
@@ -110,6 +170,7 @@ class PortalIndexPlugin extends UIComponent {
         request.onsuccess = (e) => { 
             this.db = e.target.result 
             this.processQueues();
+            this.loadRegions();
         } 
         request.onerror = (e) => console.log("PINDEX open database error", e)
         request.onupgradeneeded = (e) => this.upgradeDb(e)
@@ -118,9 +179,10 @@ class PortalIndexPlugin extends UIComponent {
     upgradeDb(e) {
         var db = e.target.result;
 
-        if (e.newVersion == 2) {
+        if (e.newVersion == 1) {
             //schema initialize
             var portals = db.createObjectStore("portals", {keyPath: "guid"})
+            var regions = db.createObjectStore("regions", {keyPath: "guid"})
         }
     }
 
@@ -201,6 +263,11 @@ class PortalIndexPlugin extends UIComponent {
             return this.db.transaction("portals", "readwrite").objectStore("portals")
         }
     }
+    get regions() {
+        if (this.db) {
+            return this.db.transaction("regions", "readwrite").objectStore("regions")
+        }
+    }
 
     processQueues() {
         if (!this.db)
@@ -248,19 +315,19 @@ class PortalIndexPlugin extends UIComponent {
         }
         this.state.searchRegions.forEach(region => {
             var row = $(`<div>${region.label} </div>`)
-            var deleteButton = $('<span>X</span>').click((e) => this.removeSearchRegion(region.stamp))
+            var deleteButton = $('<span>X</span>').click((e) => this.removeSearchRegion(region.guid))
             row.append(deleteButton)
             regions.append(row)
         })
 
-        var definedStamps = this.state.searchRegions.map(r => r.stamp)
-        var regions = this.getDrawnRegions().filter(l => definedStamps.indexOf(L.stamp(l)) == -1)
+        var definedRegions = this.state.searchRegions.map(r => r.guid)
+        var regions = this.getDrawnLayers().map(l => new SearchRegion({layer: l})).filter(r => definedRegions.indexOf(r.guid) == -1)
 
         var regionSelect = $('<select></select>')
         regionSelect.append('<option value="">Add region</option>')
         if (regions.length > 0) {
-            regions.forEach(l => {
-                regionSelect.append(`<option value="${l._leaflet_id}">${this.labelForLayer(l)}</option>`)
+            regions.forEach(r => {
+                regionSelect.append(`<option value="${r.layer._leaflet_id}">${r.label}</option>`)
             })
         }
         else if (this.state.searchRegions.length == 0) {
@@ -300,69 +367,59 @@ class PortalIndexPlugin extends UIComponent {
         return el[0];
     }
 
-    labelForLayer(layer) {
-        var area = L.GeometryUtil.geodesicArea(layer.getLatLngs())
-        var readable = L.GeometryUtil.readableArea(area)
-        if (layer._mRadius) {
-            return `Circle ${readable}`
-        }
-        else
-        if (layer instanceof L.Polygon) {
-            return `Polygon ${readable}`
-        }
-    }
-
     addSearchRegion(layer) {
-        var region = {
-            stamp: L.stamp(layer),
-            label: this.labelForLayer(layer),
-        }
-        if (layer._mRadius) {
-            region.radius = layer.getRadius()
-            region.latlng = layer.getLatLng()
-        }
-        else if (layer instanceof L.Polygon) {
-            region.latlngs = layer.getLatLngs()
-        }
+        var region = new SearchRegion({layer: layer})
+
         this.setState({
             'searchRegions': this.state.searchRegions.concat([region])
         }, () => this.saveSearchRegions())
     }
-    removeSearchRegion(stamp) {
+    removeSearchRegion(guid) {
         this.setState({
-            'searchRegions': this.state.searchRegions.filter(r => r.stamp != stamp)
+            'searchRegions': this.state.searchRegions.filter(r => r.guid != guid)
         }, () => this.saveSearchRegions())
 
     }
 
     saveSearchRegions() {
-        localStorage.setItem('portal-index-search-regions', JSON.stringify(this.state.searchRegions))
+        this.state.searchRegions.forEach(region => {
+            this.regions.add(region.getDocument())
+        })
     }
 
-    getDrawnRegions() {
+    getDrawnLayers() {
         var layers = plugin.drawTools.drawnItems.getLayers()
         return layers.filter(l => (l instanceof L.Circle || l instanceof L.Polygon))
     }
 
     portalInSearchRegions(portal) {
-        return this.state.searchRegions.map(region => this.portalInRegion(portal, region)).filter(_ => _ === true).length > 0
+        return this.state.searchRegions.map(region => region.containsPortal(portal)).filter(_ => _ === true).length > 0
     }
 
     portalInRegion(portal, region) {
-        if (region.radius !== undefined) {
+        if (region._mRadius) {
             var center = new L.LatLng(region.latlng.lat, region.latlng.lng)
-            return center.distanceTo(portal.getLatLng()) <= region.radius
+            return this.layer.getLatLng().distanceTo(portal.getLatLng()) <= this.getRadius()
         }
         else {
-            return _point_in_polygon([portal._latlng.lat, portal._latlng.lng], region.latlngs.map(ll => [ll.lat, ll.lng]))
+            return _point_in_polygon([portal._latlng.lat, portal._latlng.lng], region.layer.getLatLngs().map(ll => [ll.lat, ll.lng]))
         }
 
     }
 
+    loadRegions() {
+        this.getAll(this.regions).then(regions => {
+            this.setState({searchRegions: regions.map(d => new SearchRegion({doc: d}))})
+        })
+    }
     getAllPortals() {
+        return this.getAll(this.portals)
+    }
+
+    getAll(transaction) {
         return new Promise((resolve, reject) => {
             var results = []
-            this.portals.openCursor().onsuccess = (e) => {
+            transaction.openCursor().onsuccess = (e) => {
                 var cursor = e.target.result
                 if (cursor) {
                     results.push(cursor.value)
