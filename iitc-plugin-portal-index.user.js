@@ -100,14 +100,14 @@ class PortalIndexPlugin extends UIComponent {
 
     static initialState() {
         return {
-            'searchRegions': JSON.parse(localStorage.getItem('portal-index-search-regions') || "[]")
+            'searchRegions': JSON.parse(localStorage.getItem('portal-index-search-regions') || "[]"),
+            'newPortals': [],
         }
     }
 
     openDatabase() {
         var request = window.indexedDB.open(PortalIndexPlugin.dbName(), PortalIndexPlugin.dbVersion())
         request.onsuccess = (e) => { 
-            // console.log("PINDEX db open success", e)
             this.db = e.target.result 
             this.processQueues();
         } 
@@ -122,7 +122,6 @@ class PortalIndexPlugin extends UIComponent {
             //schema initialize
             var portals = db.createObjectStore("portals", {keyPath: "guid"})
         }
-        // console.log("PINDEX db upgrade", e)
     }
 
     handlePortalAdded(data) {
@@ -155,18 +154,17 @@ class PortalIndexPlugin extends UIComponent {
     }
 
     checkInPortal(doc) {
-        // console.log("PINDEX checkIn", doc)
         this.lookupPortal(doc.guid).then(existing => {
             if (existing) {
                 // console.log("PINDEX skip existing", existing)
             } else {
                 // console.log("PINDEX saving new", doc)
                 this.savePortal(doc).then(() => {
-                    // console.log("PINDEX saved", doc)
+                    this.setState({
+                        'newPortals': this.state.newPortals.concat([doc])
+                    })
                 })
             }
-        }, err => {
-            // console.log("PINDEX existing err", err)
         })
     }
 
@@ -182,6 +180,18 @@ class PortalIndexPlugin extends UIComponent {
         return new Promise((resolve, reject) => {
             var request = this.portals.add(doc)
             request.onsuccess = (e) => resolve(e)
+            request.onerror = (e) => reject(e)
+        })
+    }
+
+    countIndex() {
+        if (!this.db) {
+            return new Promise((resove, reject) => {reject()})
+        }
+
+        return new Promise((resolve, reject) => {
+            var request = this.portals.count()
+            request.onsuccess = (e) => resolve(request.result)
             request.onerror = (e) => reject(e)
         })
     }
@@ -229,6 +239,7 @@ class PortalIndexPlugin extends UIComponent {
     render() {
         var el = $('<div></div>')
 
+        // regions
         el.append('<h3>Search Regions</h3>')
         var regions = $('<div></div>')
         el.append(regions)
@@ -262,6 +273,29 @@ class PortalIndexPlugin extends UIComponent {
             this.addSearchRegion(layer)
         })
         el.append(regionSelect)
+
+
+        //index stats
+        el.append('<h3>Index</h3>')
+        var countDiv = $('<div>Portals in Index: </div>')
+        this.countIndex().then((count) => {countDiv.append(count)}, () => {})
+        el.append(countDiv)
+
+        if (this.state.newPortals.length > 0) {
+            var newDiv = $(`<div>Recently Discovered Portals</div>`)
+            this.state.newPortals.slice(0,4).forEach(p => {
+                var row = $(`<div>${p.name}</div>`)
+                row.click(() => selectPortalByLatLng(p.latE6/1e6, p.lngE6/1e6)) 
+                newDiv.append(row)
+            })
+            el.append(newDiv)
+        }
+
+
+        var button = $('<button>Save KML</button>')
+        button.click(() => this.saveAsKml())
+        el.append(button)
+
 
         return el[0];
     }
@@ -323,6 +357,65 @@ class PortalIndexPlugin extends UIComponent {
             return _point_in_polygon([portal._latlng.lat, portal._latlng.lng], region.latlngs.map(ll => [ll.lat, ll.lng]))
         }
 
+    }
+
+    getAllPortals() {
+        return new Promise((resolve, reject) => {
+            var results = []
+            this.portals.openCursor().onsuccess = (e) => {
+                var cursor = e.target.result
+                if (cursor) {
+                    results.push(cursor.value)
+                    cursor.continue()
+                } else {
+                    resolve(results)
+                }
+            }
+        })
+    }
+
+    saveAsKml() {
+        this.getAllPortals().then((portals) => {
+            var kml = this.generateKml(portals)
+
+            var a = document.createElement('a')
+            a.setAttribute('href', "data:application/octet-stream;base64,"+btoa(kml))
+            a.setAttribute('download', "ingress-portal-index.kml")
+            a.style.display = 'none'
+            document.body.appendChild(a)
+            a.click()
+            document.body.removeChild(a);
+        })
+    }
+
+    generateKml(portals) {
+        var placemarks = portals.map(p => `
+        <Placemark>
+            <name>${p.name}</name>
+            <visibility>1</visibility>
+            <description>https://www.ingress.com/intel?ll=${p.latE6/1e6},${p.lngE6/1e6}&amp;z=17</description>
+            <Point>
+                <coordinates>${p.lngE6/1e6},${p.latE6/1e6}</coordinates>
+            </Point>
+            <TimeStamp>
+                <when>${new Date(p.timestamp).toISOString()}</when>
+            </TimeStamp>
+            <ExtendedData>
+                <Data name="LATE6"><value>${p.latE6}</value></Data>
+                <Data name="LNGE6"><value>${p.lngE6}</value></Data>
+                <Data name="GUID"><value>${p.guid}</value></Data>
+                <Data name="REGION"><value>${p.region}</value></Data>
+            </ExtendedData>
+        </Placemark>`)
+        return `<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2">
+    <Document id="ingress-portal-index">
+        <name>ingress-portal-index.kml</name>
+        <visibility>1</visibility>
+        <open>1</open>
+        ${placemarks}
+    </Document>
+</kml>`
     }
 
 }
