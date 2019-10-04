@@ -291,9 +291,10 @@ class PortalIndexPlugin extends UIComponent {
               title: "Portal Index",
               html: this.element,
               height: 'auto',
-              width: '400px',
+              width: '20em',
               closeCallback: () => this.handleCloseDialog()
             }).dialog('option', 'buttons', {
+              'Save KML': () => { this.saveAsKml() },
               'OK': function() { $(this).dialog('close') },
             });
         }
@@ -306,18 +307,22 @@ class PortalIndexPlugin extends UIComponent {
     render() {
         var el = $('<div></div>')
 
+        var countDiv = $('<h3>Portals in Index: </h3>')
+        this.countIndex().then((count) => {countDiv.append(count)}, () => {countDiv.append(0)})
+        el.append(countDiv)
+
         // regions
-        el.append('<h3>Search Regions</h3>')
-        var regions = $('<div></div>')
-        el.append(regions)
+        var regionPane = $('<div class="regions"></div>')
+        el.append(regionPane)
+        regionPane.append('<h3>Search Regions</h3>')
         if (this.state.searchRegions.length == 0) {
-            regions.append('<p>No regions selected.</p>')
+            regionPane.append('<div class="row">No regions selected.</p>')
         }
         this.state.searchRegions.forEach(region => {
-            var row = $(`<div>${region.label} </div>`)
-            var deleteButton = $('<span>X</span>').click((e) => this.removeSearchRegion(region.guid))
-            row.append(deleteButton)
-            regions.append(row)
+            var row = $(`<div class="row"> ${region.label}</div>`)
+            var deleteButton = $('<div class="delete">🞨</div>').click((e) => this.removeSearchRegion(region.guid))
+            row.prepend(deleteButton)
+            regionPane.append(row)
         })
 
         var definedRegions = this.state.searchRegions.map(r => r.guid)
@@ -339,29 +344,23 @@ class PortalIndexPlugin extends UIComponent {
             var layer = plugin.drawTools.drawnItems.getLayer(regionSelect.val())
             this.addSearchRegion(layer)
         })
-        el.append(regionSelect)
+        regionPane.append(regionSelect)
 
 
-        //index stats
-        el.append('<h3>Index</h3>')
-        var countDiv = $('<div>Portals in Index: </div>')
-        this.countIndex().then((count) => {countDiv.append(count)}, () => {})
-        el.append(countDiv)
-
+        // recently discovered
         if (this.state.newPortals.length > 0) {
-            var newDiv = $(`<div>Recently Discovered Portals</div>`)
-            this.state.newPortals.slice(0,4).forEach(p => {
-                var row = $(`<div>${p.name}</div>`)
+            var indexPane = $('<div class="index"></div>')
+            el.append(indexPane)
+
+            indexPane.append(`<h3>Recently Discovered</h3>`)
+            var newDiv = $('<div class="portals"></div>')
+            this.state.newPortals.slice(0,5).forEach(p => {
+                var row = $(`<div class="row"><a href="#">${p.name}</a></div>`)
                 row.click(() => selectPortalByLatLng(p.latE6/1e6, p.lngE6/1e6)) 
                 newDiv.append(row)
             })
-            el.append(newDiv)
+            indexPane.append(newDiv)
         }
-
-
-        var button = $('<button>Save KML</button>')
-        button.click(() => this.saveAsKml())
-        el.append(button)
 
 
         return el[0];
@@ -375,9 +374,10 @@ class PortalIndexPlugin extends UIComponent {
         }, () => this.saveSearchRegions())
     }
     removeSearchRegion(guid) {
+        this.regions.delete(guid)
         this.setState({
             'searchRegions': this.state.searchRegions.filter(r => r.guid != guid)
-        }, () => this.saveSearchRegions())
+        })
 
     }
 
@@ -477,6 +477,30 @@ class PortalIndexPlugin extends UIComponent {
 
 }
 
+PortalIndexPlugin.css = `
+
+.index {
+    padding-top: 2em;
+}
+
+.regions select {
+    margin-top: 1em;
+    margin-left: 5em;
+}
+
+.row {
+    padding: 3px;
+}
+.row .delete {
+    float: left;
+    margin-right: 8px;
+    cursor: pointer;
+}
+
+.ui-dialog-buttonset button {
+    margin-left: 1em;
+}
+`;
 
 
 
@@ -486,6 +510,11 @@ class PortalIndexPlugin extends UIComponent {
 
 PortalIndexPlugin.boot = function() {
     window.plugin.portalIndex = new PortalIndexPlugin()
+
+    var style = document.createElement('style')
+    style.appendChild(document.createTextNode(PortalIndexPlugin.css))
+    document.head.appendChild(style)
+
 }
 
 
