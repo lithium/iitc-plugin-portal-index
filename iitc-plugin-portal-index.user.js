@@ -188,6 +188,7 @@ class PortalIndexPlugin extends UIComponent {
 
     handlePortalAdded(data) {
         var portal = data.portal
+        // console.log("PINDEX handlePortalAdded", data)
 
         if (!this.portalInSearchRegions(portal))  {
             // console.log("PINDEX portal outside region", portal.options.data.title)
@@ -201,13 +202,19 @@ class PortalIndexPlugin extends UIComponent {
         }
 
         var doc = { 
-            name: portal.options.data.title,
             guid: portal.options.guid,
+            name: portal.options.data.title,
             latE6: portal.options.data.latE6,
             lngE6: portal.options.data.lngE6,
             timestamp: Date.now(),
             history: [],
         }
+
+        if (!(doc.name && doc.guid && doc.latE6 && doc.lngE6)) {
+            // console.log("PINDEX skip missing data", doc, portal)
+            return;
+        }
+
         if (window.plugin.regions) {
             doc.region = window.plugin.regions.regionName(S2.S2Cell.FromLatLng(portal.getLatLng(), 6));
         }
@@ -217,16 +224,33 @@ class PortalIndexPlugin extends UIComponent {
 
     checkInPortal(doc) {
         this.lookupPortal(doc.guid).then(existing => {
+            var key = undefined
+
             if (existing) {
-                // console.log("PINDEX skip existing", existing)
+                if (existing.name == doc.name && 
+                    existing.latE6 == doc.latE6 &&
+                    existing.lngE6 == doc.lngE6l) {
+                // console.log("PINDEX skip existing", existing, doc)
+                    return;
+                }
+
+                doc.history = Object.assign([], existing.history)
+                delete existing.history
+                doc.history.unshift(existing)
+                console.log("PINDEX update existing", existing, doc)
+
+                key = doc.guid
             } else {
-                // console.log("PINDEX saving new", doc)
-                this.savePortal(doc).then(() => {
-                    this.setState({
-                        'newPortals': this.state.newPortals.concat([doc])
-                    })
-                })
+                // console.log("PINDEX add new portal", doc)
             }
+
+
+            //upsert
+            this.savePortal(doc, key).then(() => {
+                this.setState({
+                    'newPortals': this.state.newPortals.concat([doc])
+                })
+            })
         })
     }
 
@@ -238,9 +262,9 @@ class PortalIndexPlugin extends UIComponent {
         })
     }
 
-    savePortal(doc) {
+    savePortal(doc, key) {
         return new Promise((resolve, reject) => {
-            var request = this.portals.add(doc)
+            var request = this.portals.put(doc, key)
             request.onsuccess = (e) => resolve(e)
             request.onerror = (e) => reject(e)
         })
@@ -354,7 +378,7 @@ class PortalIndexPlugin extends UIComponent {
 
             indexPane.append(`<h3>Recently Discovered</h3>`)
             var newDiv = $('<div class="portals"></div>')
-            this.state.newPortals.slice(0,5).forEach(p => {
+            this.state.newPortals.slice(-5).reverse().forEach(p => {
                 var row = $(`<div class="row"><a href="#">${p.name}</a></div>`)
                 row.click(() => selectPortalByLatLng(p.latE6/1e6, p.lngE6/1e6)) 
                 newDiv.append(row)
@@ -436,7 +460,7 @@ class PortalIndexPlugin extends UIComponent {
             var kml = this.generateKml(portals)
 
             var a = document.createElement('a')
-            a.setAttribute('href', "data:application/octet-stream;base64,"+btoa(kml))
+            a.setAttribute('href', "data:application/octet-stream;base64,"+btoa(unescape(encodeURIComponent(kml))))
             a.setAttribute('download', "ingress-portal-index.kml")
             a.style.display = 'none'
             document.body.appendChild(a)
@@ -448,7 +472,7 @@ class PortalIndexPlugin extends UIComponent {
     generateKml(portals) {
         var placemarks = portals.map(p => `
         <Placemark>
-            <name>${p.name}</name>
+            <name>${p.name.replace('&', '&amp;')}</name>
             <visibility>1</visibility>
             <description>https://www.ingress.com/intel?ll=${p.latE6/1e6},${p.lngE6/1e6}&amp;z=17</description>
             <Point>
